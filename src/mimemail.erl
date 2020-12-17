@@ -806,7 +806,7 @@ encode_parameters(Parameters) ->
 	[encode_parameter(Parameter) || Parameter <- Parameters].
 
 encode_parameter({X, Y}) ->
-	YEnc = iolist_to_binary(rfc2047_utf8_encode(Y)),
+	YEnc = iolist_to_binary(rfc2047_utf8_encode(Y, byte_size(X) + 2, "\t")),
 	case escape_tspecial(YEnc, false, <<>>) of
 		{true, Special} -> [X, $=, $", Special, $"];
 		false -> [X, $=, YEnc]
@@ -861,6 +861,8 @@ encode_header_value(H, Value) when H =:= <<"To">>; H =:= <<"Cc">>; H =:= <<"Bcc"
 	{Names, Emails} = lists:unzip(Addresses),
 	NewNames = lists:map(fun rfc2047_utf8_encode/1, Names),
 	smtp_util:combine_rfc822_addresses(lists:zip(NewNames, Emails));
+encode_header_value(H, Value) when H =:= <<"Content-Type">>; H =:= <<"Content-Disposition">> ->
+	Value; % Parameters are already encoded.
 encode_header_value(_, Value) ->
 	rfc2047_utf8_encode(Value).
 
@@ -996,40 +998,45 @@ fix_encoding(Encoding) ->
 
 %% @doc Encode a binary or list according to RFC 2047. Input is
 %% assumed to be in UTF-8 encoding.
-rfc2047_utf8_encode(undefined) -> undefined;
-rfc2047_utf8_encode(B) when is_binary(B) ->
-	rfc2047_utf8_encode(binary_to_list(B));
-rfc2047_utf8_encode([]) ->
-	[];
-rfc2047_utf8_encode(Text) ->
+rfc2047_utf8_encode(T) ->
+    rfc2047_utf8_encode(T, 0, " ").
+
+rfc2047_utf8_encode(undefined, _PrefixLen, _LineIdent) ->
+    undefined;
+rfc2047_utf8_encode(B, PrefixLen, LineIdent) when is_binary(B) ->
+    rfc2047_utf8_encode(binary_to_list(B), PrefixLen, LineIdent);
+rfc2047_utf8_encode([], _PrefixLen, _LineIdent) ->
+    [];
+rfc2047_utf8_encode(Text, PrefixLen, LineIdent) ->
     %% Don't escape when all characters are ASCII printable
     case is_ascii_printable(Text) of
         'true' -> Text;
-        'false' -> rfc2047_utf8_encode(Text, lists:reverse("=?UTF-8?Q?"), 10, [])
+        'false' -> rfc2047_utf8_encode(Text, lists:reverse("=?UTF-8?Q?"), 10 + PrefixLen, LineIdent, [])
     end.
 
-rfc2047_utf8_encode(T, Acc, WordLen, Char) when WordLen + length(Char) > 73 ->
-    CloseLine = lists:reverse("?=\r\n "),
+
+rfc2047_utf8_encode(T, Acc, WordLen, LineIdent, Char) when WordLen + length(Char) > 73 ->
+    CloseLine = lists:reverse("?=\r\n" ++ LineIdent),
     NewLine = Char ++ lists:reverse("=?UTF-8?Q?"),
     %% Make sure that the individual encoded words are not longer than 76 chars (including charset etc)
-    rfc2047_utf8_encode(T, NewLine ++ CloseLine ++ Acc, length(NewLine), []);
+    rfc2047_utf8_encode(T, NewLine ++ CloseLine ++ Acc, length(NewLine), LineIdent, []);
 
-rfc2047_utf8_encode([], Acc, _WordLen, Char) ->
+rfc2047_utf8_encode([], Acc, _WordLen, _LineIdent, Char) ->
     lists:reverse("=?" ++ Char ++ Acc);
 
 %% Printable ASCII characters dont encode except space, ?, _, = and .
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 32 andalso C < 127 andalso C /= 32
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 32 andalso C < 127 andalso C /= 32
     andalso C /= $? andalso C /= $_ andalso C /= $= andalso C /= $. ->
-    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), [C]);
+    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), LineIdent, [C]);
 %% Encode all other ASCII
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 0 andalso C =< 192 ->
-    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), encode_byte(C));
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 0 andalso C =< 192 ->
+    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), LineIdent, encode_byte(C));
 %% First byte of UTF-8 sequence
 %% ensure that encoded 2-4 byte UTF-8 characters keept in one line
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 192 andalso C =< 247 ->
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 192 andalso C =< 247 ->
     UTFBytes = utf_char_bytes(C),
     {Rest, ExtraUTFBytes} = encode_extra_utf_bytes(UTFBytes-1, T),
-    rfc2047_utf8_encode(Rest, Char ++ Acc, WordLen+length(Char), ExtraUTFBytes ++ encode_byte(C)).
+    rfc2047_utf8_encode(Rest, Char ++ Acc, WordLen+length(Char), LineIdent, ExtraUTFBytes ++ encode_byte(C)).
 
 is_ascii_printable([]) -> 'true';
 is_ascii_printable([H|T]) when H >= 32 andalso H =< 126 ->
