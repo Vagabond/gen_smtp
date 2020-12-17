@@ -1993,6 +1993,66 @@ encoding_test_() ->
 					?assertEqual(Result, encode(Email))
 			end
 		},
+
+		{"Email with UTF-8 in attachment filename.",
+			fun() ->
+				FileName = <<
+					"Čia labai ilgas el. laiško priedo pavadinimas su "/utf8,
+					"lietuviškomis ar kokiomis kitomis ne ascii raidėmis.pdf"/utf8
+				>>,
+				Email = {<<"multipart">>, <<"mixed">>,
+					[
+						{<<"From">>,       <<"k.petrauskas@erisata.lt">>},
+						{<<"Subject">>,    <<"Čiobiškis"/utf8>>},
+						{<<"Date">>,       <<"Thu, 17 Dec 2020 20:12:33 +0200">>},
+						{<<"Message-ID">>, <<"<47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>">>}
+					],
+					#{
+						content_type_params => [
+							{<<"boundary">>, <<"_=boundary-123=_">>}
+						]
+					},
+					[
+						{<<"application">>, <<"pdf">>, [],
+							#{
+								content_type_params => [
+									{<<"name">>,        FileName},
+									{<<"disposition">>, <<"attachment">>}
+								],
+								disposition         => <<"attachment">>,
+								disposition_params  => [{<<"filename">>, FileName}]
+							},
+							<<"data">>
+						}
+					]
+				},
+				Result = <<
+					"From: k.petrauskas@erisata.lt\r\n"
+					"Subject: =?UTF-8?Q?=C4=8Ciobi=C5=A1kis?=\r\n"
+					"Date: Thu, 17 Dec 2020 20:12:33 +0200\r\n"
+					"Message-ID: <47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>\r\n"
+					"Content-Type: multipart/mixed;\r\n"
+					"\tboundary=\"_=boundary-123=_\"\r\n"
+					"MIME-Version: 1.0\r\n"
+					"\r\n"
+					"\r\n"
+					"--_=boundary-123=_\r\n"
+					"Content-Type: application/pdf;\r\n"
+					"\tname=\"=?UTF-8?Q?=C4=8Cia=20labai=20ilgas=20el=2E=20lai=C5=A1ko=20priedo?=\r\n"
+					"\t=?UTF-8?Q?=20pavadinimas=20su=20lietuvi=C5=A1komis=20ar=20kokiomis=20kito?=\r\n"
+					"\t=?UTF-8?Q?mis=20ne=20ascii=20raid=C4=97mis=2Epdf?=\";\r\n"
+					"\tdisposition=attachment\r\n"
+					"Content-Disposition: attachment;\r\n"
+					"\tfilename=\"=?UTF-8?Q?=C4=8Cia=20labai=20ilgas=20el=2E=20lai=C5=A1ko=20prie?=\r\n"
+					"\t=?UTF-8?Q?do=20pavadinimas=20su=20lietuvi=C5=A1komis=20ar=20kokiomis=20ki?=\r\n"
+					"\t=?UTF-8?Q?tomis=20ne=20ascii=20raid=C4=97mis=2Epdf?=\"\r\n"
+					"\r\n"
+					"data\r\n"
+					"--_=boundary-123=_--\r\n"
+				>>,
+				?assertEqual(Result, encode(Email))
+			end
+		},
 		{"Email with special chars in From",
 			fun() ->
 					Email = {<<"text">>, <<"plain">>, [
