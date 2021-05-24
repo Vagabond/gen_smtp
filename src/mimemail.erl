@@ -806,9 +806,10 @@ encode_parameters(Parameters) ->
 	[encode_parameter(Parameter) || Parameter <- Parameters].
 
 encode_parameter({X, Y}) ->
-	case escape_tspecial(Y, false, <<>>) of
+	YEnc = iolist_to_binary(rfc2047_utf8_encode(Y, byte_size(X) + 2, "\t")),
+	case escape_tspecial(YEnc, false, <<>>) of
 		{true, Special} -> [X, $=, $", Special, $"];
-		false -> [X, $=, Y]
+		false -> [X, $=, YEnc]
 	end.
 
 % See also: http://www.ietf.org/rfc/rfc2045.txt section 5.1
@@ -860,6 +861,8 @@ encode_header_value(H, Value) when H =:= <<"To">>; H =:= <<"Cc">>; H =:= <<"Bcc"
 	{Names, Emails} = lists:unzip(Addresses),
 	NewNames = lists:map(fun rfc2047_utf8_encode/1, Names),
 	smtp_util:combine_rfc822_addresses(lists:zip(NewNames, Emails));
+encode_header_value(H, Value) when H =:= <<"Content-Type">>; H =:= <<"Content-Disposition">> ->
+	Value; % Parameters are already encoded.
 encode_header_value(_, Value) ->
 	rfc2047_utf8_encode(Value).
 
@@ -995,40 +998,45 @@ fix_encoding(Encoding) ->
 
 %% @doc Encode a binary or list according to RFC 2047. Input is
 %% assumed to be in UTF-8 encoding.
-rfc2047_utf8_encode(undefined) -> undefined;
-rfc2047_utf8_encode(B) when is_binary(B) ->
-	rfc2047_utf8_encode(binary_to_list(B));
-rfc2047_utf8_encode([]) ->
-	[];
-rfc2047_utf8_encode(Text) ->
+rfc2047_utf8_encode(T) ->
+    rfc2047_utf8_encode(T, 0, " ").
+
+rfc2047_utf8_encode(undefined, _PrefixLen, _LineIdent) ->
+    undefined;
+rfc2047_utf8_encode(B, PrefixLen, LineIdent) when is_binary(B) ->
+    rfc2047_utf8_encode(binary_to_list(B), PrefixLen, LineIdent);
+rfc2047_utf8_encode([], _PrefixLen, _LineIdent) ->
+    [];
+rfc2047_utf8_encode(Text, PrefixLen, LineIdent) ->
     %% Don't escape when all characters are ASCII printable
     case is_ascii_printable(Text) of
         'true' -> Text;
-        'false' -> rfc2047_utf8_encode(Text, lists:reverse("=?UTF-8?Q?"), 10, [])
+        'false' -> rfc2047_utf8_encode(Text, lists:reverse("=?UTF-8?Q?"), 10 + PrefixLen, LineIdent, [])
     end.
 
-rfc2047_utf8_encode(T, Acc, WordLen, Char) when WordLen + length(Char) > 73 ->
-    CloseLine = lists:reverse("?=\r\n "),
+
+rfc2047_utf8_encode(T, Acc, WordLen, LineIdent, Char) when WordLen + length(Char) > 73 ->
+    CloseLine = lists:reverse("?=\r\n" ++ LineIdent),
     NewLine = Char ++ lists:reverse("=?UTF-8?Q?"),
     %% Make sure that the individual encoded words are not longer than 76 chars (including charset etc)
-    rfc2047_utf8_encode(T, NewLine ++ CloseLine ++ Acc, length(NewLine), []);
+    rfc2047_utf8_encode(T, NewLine ++ CloseLine ++ Acc, length(NewLine), LineIdent, []);
 
-rfc2047_utf8_encode([], Acc, _WordLen, Char) ->
+rfc2047_utf8_encode([], Acc, _WordLen, _LineIdent, Char) ->
     lists:reverse("=?" ++ Char ++ Acc);
 
 %% Printable ASCII characters dont encode except space, ?, _, = and .
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 32 andalso C < 127 andalso C /= 32
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 32 andalso C < 127 andalso C /= 32
     andalso C /= $? andalso C /= $_ andalso C /= $= andalso C /= $. ->
-    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), [C]);
+    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), LineIdent, [C]);
 %% Encode all other ASCII
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 0 andalso C =< 192 ->
-    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), encode_byte(C));
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 0 andalso C =< 192 ->
+    rfc2047_utf8_encode(T, Char ++ Acc, WordLen+length(Char), LineIdent, encode_byte(C));
 %% First byte of UTF-8 sequence
 %% ensure that encoded 2-4 byte UTF-8 characters keept in one line
-rfc2047_utf8_encode([C|T], Acc, WordLen, Char) when C > 192 andalso C =< 247 ->
+rfc2047_utf8_encode([C|T], Acc, WordLen, LineIdent, Char) when C > 192 andalso C =< 247 ->
     UTFBytes = utf_char_bytes(C),
     {Rest, ExtraUTFBytes} = encode_extra_utf_bytes(UTFBytes-1, T),
-    rfc2047_utf8_encode(Rest, Char ++ Acc, WordLen+length(Char), ExtraUTFBytes ++ encode_byte(C)).
+    rfc2047_utf8_encode(Rest, Char ++ Acc, WordLen+length(Char), LineIdent, ExtraUTFBytes ++ encode_byte(C)).
 
 is_ascii_printable([]) -> 'true';
 is_ascii_printable([H|T]) when H >= 32 andalso H =< 126 ->
@@ -1997,6 +2005,66 @@ encoding_test_() ->
 						<<"This is a plain message">>},
 					Result = <<"Subject: =?UTF-8?Q?Fr=C3=A6derik=20H=C3=B8lljen?=\r\nFrom: =?UTF-8?Q?Fr=C3=A6derik=20H=C3=B8lljen?= <me@example.com>\r\nTo: you@example.com\r\nMessage-ID: <abcd@example.com>\r\nMIME-Version: 1.0\r\nDate: Sun, 01 Nov 2009 14:44:47 +0200\r\n\r\nThis is a plain message">>,
 					?assertEqual(Result, encode(Email))
+			end
+		},
+
+		{"Email with UTF-8 in attachment filename.",
+			fun() ->
+				FileName = <<
+					"Čia labai ilgas el. laiško priedo pavadinimas su "/utf8,
+					"lietuviškomis ar kokiomis kitomis ne ascii raidėmis.pdf"/utf8
+				>>,
+				Email = {<<"multipart">>, <<"mixed">>,
+					[
+						{<<"From">>,       <<"k.petrauskas@erisata.lt">>},
+						{<<"Subject">>,    <<"Čiobiškis"/utf8>>},
+						{<<"Date">>,       <<"Thu, 17 Dec 2020 20:12:33 +0200">>},
+						{<<"Message-ID">>, <<"<47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>">>}
+					],
+					#{
+						content_type_params => [
+							{<<"boundary">>, <<"_=boundary-123=_">>}
+						]
+					},
+					[
+						{<<"application">>, <<"pdf">>, [],
+							#{
+								content_type_params => [
+									{<<"name">>,        FileName},
+									{<<"disposition">>, <<"attachment">>}
+								],
+								disposition         => <<"attachment">>,
+								disposition_params  => [{<<"filename">>, FileName}]
+							},
+							<<"data">>
+						}
+					]
+				},
+				Result = <<
+					"From: k.petrauskas@erisata.lt\r\n"
+					"Subject: =?UTF-8?Q?=C4=8Ciobi=C5=A1kis?=\r\n"
+					"Date: Thu, 17 Dec 2020 20:12:33 +0200\r\n"
+					"Message-ID: <47a08b7ff7d305087877361ca8eea1db@karolis.erisata.lt>\r\n"
+					"Content-Type: multipart/mixed;\r\n"
+					"\tboundary=\"_=boundary-123=_\"\r\n"
+					"MIME-Version: 1.0\r\n"
+					"\r\n"
+					"\r\n"
+					"--_=boundary-123=_\r\n"
+					"Content-Type: application/pdf;\r\n"
+					"\tname=\"=?UTF-8?Q?=C4=8Cia=20labai=20ilgas=20el=2E=20lai=C5=A1ko=20priedo?=\r\n"
+					"\t=?UTF-8?Q?=20pavadinimas=20su=20lietuvi=C5=A1komis=20ar=20kokiomis=20kito?=\r\n"
+					"\t=?UTF-8?Q?mis=20ne=20ascii=20raid=C4=97mis=2Epdf?=\";\r\n"
+					"\tdisposition=attachment\r\n"
+					"Content-Disposition: attachment;\r\n"
+					"\tfilename=\"=?UTF-8?Q?=C4=8Cia=20labai=20ilgas=20el=2E=20lai=C5=A1ko=20prie?=\r\n"
+					"\t=?UTF-8?Q?do=20pavadinimas=20su=20lietuvi=C5=A1komis=20ar=20kokiomis=20ki?=\r\n"
+					"\t=?UTF-8?Q?tomis=20ne=20ascii=20raid=C4=97mis=2Epdf?=\"\r\n"
+					"\r\n"
+					"data\r\n"
+					"--_=boundary-123=_--\r\n"
+				>>,
+				?assertEqual(Result, encode(Email))
 			end
 		},
 		{"Email with special chars in From",
