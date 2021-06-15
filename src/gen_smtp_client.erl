@@ -31,7 +31,8 @@
 		{tls_options, [{versions, ['tlsv1', 'tlsv1.1', 'tlsv1.2']}]}, % used in ssl:connect, http://erlang.org/doc/man/ssl.html
 		{auth, if_available},
 		{hostname, smtp_util:guess_FQDN()},
-		{retries, 1} % how many retries per smtp host on temporary failure
+		{retries, 1}, % how many retries per smtp host on temporary failure
+		{on_transaction_error, quit}
 	]).
 
 -define(AUTH_PREFERENCE, [
@@ -79,7 +80,8 @@
                     {retries, non_neg_integer()} |
                     {username, string()} |
                     {password, string()} |
-                    {trace_fun, fun( (Fmt :: string(), Args :: [any()]) -> any() )}].
+                    {trace_fun, fun( (Fmt :: string(), Args :: [any()]) -> any() )} |
+                    {on_transaction_error, quit | reset}].
 
 -type extensions() :: [{binary(), binary()}].
 
@@ -225,9 +227,11 @@ open(Options) ->
 			{error, bad_option, Reason}
 	end.
 
--spec deliver(Socket :: smtp_client_socket(), Email :: email()) -> {'ok', Receipt :: binary()} | {error, failure()}.
+-spec deliver(Socket :: smtp_client_socket(), Email :: email()) -> {'ok', Receipt :: binary()} | {error, FailMsg :: failure()}.
 %% @doc Deliver an email on an open smtp client socket.
 %% For use with a socket opened with open/1. The socket can be reused as long as the previous call to deliver/2 returned `{ok, Receipt}'.
+%% If the previous call to deliver/2 returned `{error, FailMsg}' and the option `{on_transaction_error, reset}' was given in the open/1 call,
+%% the socket <em>may</em> still be reused.
 deliver(#smtp_client_socket{} = SmtpClientSocket, Email) ->
 	#smtp_client_socket{
 		socket = Socket,
@@ -275,12 +279,12 @@ send_it(Email, Options) ->
 				options = Options1
 			} = ClientSocket,
 			try
-				Receipt = try_sending_it(Email, Socket, Extensions, Options1),
-				quit(Socket),
-				Receipt
+				try_sending_it(Email, Socket, Extensions, Options1)
 			catch
 				throw:{FailureType, Message} ->
 					{error, send, {FailureType, Host, Message}}
+			after
+				quit(Socket)
 			end
 	end.
 
@@ -371,14 +375,22 @@ try_sending_it({From, To, Body}, Socket, Extensions, Options) ->
 try_MAIL_FROM(From, Socket, Extensions, Options) when is_binary(From) ->
 	try_MAIL_FROM(binary_to_list(From), Socket, Extensions, Options);
 try_MAIL_FROM("<" ++ _ = From, Socket, _Extensions, Options) ->
+	OnTxError = proplists:get_value(on_transaction_error, Options),
 	% TODO do we need to bother with SIZE?
 	smtp_socket:send(Socket, ["MAIL FROM:", From, "\r\n"]),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"250", _Rest/binary>>} ->
 			true;
+		{ok, <<"4", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			rset_or_quit(Socket),
+			throw({temporary_failure, Msg});
 		{ok, <<"4", _Rest/binary>> = Msg} ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
+		{ok, <<"5", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			trace(Options, "Mail FROM rejected: ~p~n", [Msg]),
+			ok = rset_or_quit(Socket),
+			throw({permanent_failure, Msg});
 		{ok, Msg} ->
 			trace(Options, "Mail FROM rejected: ~p~n", [Msg]),
 			quit(Socket),
@@ -394,15 +406,22 @@ try_RCPT_TO([], _Socket, _Extensions, _Options) ->
 try_RCPT_TO([To | Tail], Socket, Extensions, Options) when is_binary(To) ->
 	try_RCPT_TO([binary_to_list(To) | Tail], Socket, Extensions, Options);
 try_RCPT_TO(["<" ++ _ = To | Tail], Socket, Extensions, Options) ->
+	OnTxError = proplists:get_value(on_transaction_error, Options),
 	smtp_socket:send(Socket, ["RCPT TO:",To,"\r\n"]),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"250", _Rest/binary>>} ->
 			try_RCPT_TO(Tail, Socket, Extensions, Options);
 		{ok, <<"251", _Rest/binary>>} ->
 			try_RCPT_TO(Tail, Socket, Extensions, Options);
+		{ok, <<"4", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			rset_or_quit(Socket),
+			throw({temporary_failure, Msg});
 		{ok, <<"4", _Rest/binary>> = Msg} ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
+		{ok, <<"5", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			rset_or_quit(Socket),
+			throw({permanent_failure, Msg});
 		{ok, Msg} ->
 			quit(Socket),
 			throw({permanent_failure, Msg})
@@ -414,7 +433,8 @@ try_RCPT_TO([To | Tail], Socket, Extensions, Options) ->
 -spec try_DATA(Body :: binary() | function(), Socket :: smtp_socket:socket(), Extensions :: extensions(), Options :: options()) -> binary().
 try_DATA(Body, Socket, Extensions, Options) when is_function(Body) ->
 	try_DATA(Body(), Socket, Extensions, Options);
-try_DATA(Body, Socket, _Extensions, _Options) ->
+try_DATA(Body, Socket, _Extensions, Options) ->
+	OnTxError = proplists:get_value(on_transaction_error, Options),
 	smtp_socket:send(Socket, "DATA\r\n"),
 	case read_possible_multiline_reply(Socket) of
 		{ok, <<"354", _Rest/binary>>} ->
@@ -424,16 +444,24 @@ try_DATA(Body, Socket, _Extensions, _Options) ->
 			case read_possible_multiline_reply(Socket) of
 				{ok, <<"250 ", Receipt/binary>>} ->
 					Receipt;
+				{ok, <<"4", _Rest2/binary>> = Msg} when OnTxError =:= reset ->
+					throw({temporary_failure, Msg});
 				{ok, <<"4", _Rest2/binary>> = Msg} ->
 					quit(Socket),
 					throw({temporary_failure, Msg});
+				{ok, <<"5", _Rest2/binary>> = Msg} when OnTxError =:= reset ->
+					throw({permanent_failure, Msg});
 				{ok, Msg} ->
 					quit(Socket),
 					throw({permanent_failure, Msg})
 			end;
+		{ok, <<"4", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			throw({temporary_failure, Msg});
 		{ok, <<"4", _Rest/binary>> = Msg} ->
 			quit(Socket),
 			throw({temporary_failure, Msg});
+		{ok, <<"5", _Rest/binary>> = Msg} when OnTxError =:= reset ->
+			throw({permanent_failure, Msg});
 		{ok, Msg} ->
 			quit(Socket),
 			throw({permanent_failure, Msg})
@@ -761,6 +789,15 @@ read_multiline_reply(Socket, Code, Acc) ->
 			end;
 		Error ->
 			throw({network_failure, Error})
+	end.
+
+rset_or_quit(Socket) ->
+	ok = smtp_socket:send(Socket, "RSET\r\n"),
+	case read_possible_multiline_reply(Socket) of
+		{ok, <<"250", _Rest/binary>>} ->
+			ok;
+		{ok, _Msg} ->
+			quit(Socket)
 	end.
 
 quit(Socket) ->
