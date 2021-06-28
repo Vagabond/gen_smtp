@@ -172,7 +172,7 @@ encode({Type, Subtype, Headers, ContentTypeParams, Parts}, Options) ->
 					"\r\n\r\n",
 					EncodedBody]);
 encode(_, _) ->
-	?LOG_DEBUG("Not a mime-decoded DATA", []),
+	?LOG_DEBUG("Not a mime-decoded DATA"),
 	erlang:error(non_mime).
 
 

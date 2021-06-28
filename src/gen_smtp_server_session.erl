@@ -581,7 +581,7 @@ handle_request({<<"MAIL">>, Args},
 									send(State, Message),
 									{ok, State};
 								NewState ->
-									?LOG_DEBUG("OK", []),
+									?LOG_DEBUG("OK"),
 									case Module:handle_MAIL(ParsedAddress, State#state.callbackstate) of
 										{ok, CallbackState} ->
 											send(State, "250 sender Ok\r\n"),
@@ -652,7 +652,7 @@ handle_request({<<"DATA">> = C, <<>>}, #state{envelope = Envelope} = State) ->
 			{ok, State1};
 		_Else ->
 			send(State, "354 enter mail, end with line containing only '.'\r\n"),
-			?LOG_DEBUG("switching to data read mode", []),
+			?LOG_DEBUG("switching to data read mode"),
 
 			{ok, State#state{readmessage = true}}
 	end;
@@ -708,7 +708,7 @@ handle_request({<<"STARTTLS">>, <<>>}, #state{socket = Socket, module = Module, 
 			{ok, [{active, false}]} = inet:getopts(Socket, [active]),
 			case ranch_ssl:handshake(Socket, [{packet, line}, {mode, list}, {ssl_imp, new} | TlsOpts2], 5000) of %XXX: see smtp_socket:?SSL_LISTEN_OPTIONS
 				{ok, NewSocket} ->
-					?LOG_DEBUG("SSL negotiation sucessful", []),
+					?LOG_DEBUG("SSL negotiation sucessful"),
 					ranch_ssl:setopts(NewSocket, [{packet, line}]),
 					{ok, State#state{socket = NewSocket, transport = ranch_ssl, envelope=undefined,
 							authdata=undefined, waitingauth=false, readmessage=false,
@@ -838,7 +838,7 @@ try_auth(AuthType, Username, Credential, #state{module = Module, envelope = Enve
 					{ok, NewState}
 				end;
 		false ->
-			?LOG_WARNING("Please define handle_AUTH/4 in your server module or remove AUTH from your module extensions", []),
+			?LOG_WARNING("Please define handle_AUTH/4 in your server module or remove AUTH from your module extensions"),
 			send(State, "535 authentication failed (#5.7.1)\r\n"),
 			{ok, NewState}
 	end.

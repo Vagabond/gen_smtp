@@ -9,8 +9,8 @@
 	handle_RCPT/2, handle_RCPT_extension/2, handle_DATA/4, handle_RSET/1, handle_VRFY/2,
 	handle_other/3, handle_AUTH/4, handle_STARTTLS/1, handle_info/2, handle_error/3,
 	code_change/3, terminate/2]).
+
 -include_lib("kernel/include/logger.hrl").
--define(RELAY, true).
 
 -record(state,
 	{
@@ -41,7 +41,7 @@ init(Hostname, SessionCount, Address, Options) ->
 			State = #state{options = Options},
 			{ok, Banner, State};
 		true ->
-			?LOG_WARNING("Connection limit exceeded", []),
+			?LOG_WARNING("Connection limit exceeded"),
 			{stop, normal, ["421 ", Hostname, " is too busy to accept mail right now"]}
 	end.
 
@@ -184,7 +184,7 @@ handle_DATA(From, To, Data, State) ->
 					% In this example we try to decode the email
 					try mimemail:decode(Data) of
 						_Result ->
-							?LOG_INFO("Message decoded successfully!", [])
+							?LOG_INFO("Message decoded successfully!")
 					catch
 						What:Why ->
 							?LOG_WARNING("Message decode FAILED with ~p:~p", [What, Why]),
@@ -240,7 +240,7 @@ handle_AUTH(_Type, _Username, _Password, _State) ->
 %% it only gets called if you add STARTTLS to your ESMTP extensions
 -spec handle_STARTTLS(#state{}) -> #state{}.
 handle_STARTTLS(State) ->
-  ?LOG_INFO("Start TLS", []),
+  ?LOG_INFO("Start TLS"),
   State.
 
 -spec handle_info(Info :: term(), State :: term()) ->
